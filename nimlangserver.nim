@@ -62,6 +62,7 @@ proc registerRoutes(srv: RpcSocketServer, ls: LanguageServer) =
   #Extension
   srv.register("extension/macroExpand", wrapRpc(partial(expand, ls)))
   srv.register("nim/traceExpandMacro", wrapRpc(partial(traceExpandMacro, ls)))
+  srv.register("nim/traceStaticBlock", wrapRpc(partial(traceStaticBlock, ls)))
   srv.register("extension/status", wrapRpc(partial(status, ls)))
   srv.register("extension/capabilities", wrapRpc(partial(extensionCapabilities, ls)))
   srv.register("extension/suggest", wrapRpc(partial(extensionSuggest, ls)))

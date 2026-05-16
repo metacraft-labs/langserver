@@ -568,6 +568,7 @@ createFileOnlyCommand(globalSymbols)
 createGlobalCommand(recompile)
 createRangeCommand(inlayHints)
 createFullCommand(traceExpand)
+createFullCommand(traceStatic)
 
 proc `mod`*(
     nimsuggest: Nimsuggest, file: string, dirtyfile = ""

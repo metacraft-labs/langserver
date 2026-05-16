@@ -38,6 +38,7 @@ const
   RECOMPILE_COMMAND* = "nimlangserver.recompile"
   CHECK_PROJECT_COMMAND* = "nimlangserver.checkProject"
   TRACE_EXPAND_COMMAND* = "nim/traceExpandMacro"
+  TRACE_STATIC_COMMAND* = "nim/traceStaticBlock"
   FILE_CHECK_DELAY* = 1000
   LSPVersion* = getVersionFromNimble()
   CRLF* = "\r\n"

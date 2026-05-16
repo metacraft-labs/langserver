@@ -97,7 +97,7 @@ proc initialize*(
             some(
               @[
                 RESTART_COMMAND, RECOMPILE_COMMAND, CHECK_PROJECT_COMMAND,
-                TRACE_EXPAND_COMMAND,
+                TRACE_EXPAND_COMMAND, TRACE_STATIC_COMMAND,
               ]
             )
         )
@@ -283,6 +283,42 @@ proc traceExpandMacro*(
       raise newException(CatchableError,
         "Trace expansion failed: empty trace path")
     return TraceExpandResult(tracePath: tracePath)
+
+proc traceStaticBlock*(
+    ls: LanguageServer, params: TraceStaticParams
+): Future[TraceStaticResult] {.async.} =
+  ## CTFS-M-StaticBlockTrace bridge: proxies nimsuggest's `tracestatic`
+  ## query.  The query mirrors `traceExpand` but matches at
+  ## `evalConstExprAux` entry points (static: blocks, const initializers,
+  ## {.compileTime.} proc bodies, `static(expr)`) and emits a `.ct` file
+  ## under `<nimcache>/static_trace_<line>.ct`.
+  ##
+  ## See `codetracer-nim` commit `df227efd0` for the nimsuggest side.
+  with (params.position, params.textDocument):
+    let ns = await ls.tryGetNimsuggest(uri)
+    if ns.isNone:
+      raise newException(CatchableError,
+        "nimsuggest is not available for this file")
+    let ch = ls.getCharacter(uri, line, character)
+    if ch.isNone:
+      raise newException(CatchableError,
+        "Unable to resolve character position")
+    let results =
+      try:
+        await ns.get.traceStatic(
+          uriToPath(uri), ls.uriToStash(uri), line + 1, ch.get)
+      except CatchableError as e:
+        raise newException(CatchableError,
+          "nimsuggest does not support traceStatic: " & e.msg)
+    if results.len == 0:
+      raise newException(CatchableError,
+        "No trace result at this position " &
+        "(not a static block / const / compileTime body?)")
+    let tracePath = results[0].doc
+    if tracePath == "":
+      raise newException(CatchableError,
+        "Trace static block failed: empty trace path")
+    return TraceStaticResult(tracePath: tracePath)
 
 proc status*(
     ls: LanguageServer, params: NimLangServerStatusParams
@@ -677,6 +713,18 @@ proc executeCommand*(
     )
     let traceResult = await ls.traceExpandMacro(traceParams)
     return %*traceResult
+  of TRACE_STATIC_COMMAND:
+    debug "Trace static block"
+    let args = params.arguments[0]
+    let staticParams = TraceStaticParams(
+      textDocument: TextDocumentIdentifier(uri: args["uri"].getStr),
+      position: Position(
+        line: uinteger(args["line"].getInt),
+        character: uinteger(args["character"].getInt),
+      ),
+    )
+    let staticResult = await ls.traceStaticBlock(staticParams)
+    return %*staticResult
   else:
     let projectFile = params.arguments[0].getStr
     case params.command

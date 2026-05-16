@@ -5,4 +5,5 @@ import
   textensions,
   tmisc,
   ttestrunner,
-  test_trace_expand
+  test_trace_expand,
+  test_trace_static

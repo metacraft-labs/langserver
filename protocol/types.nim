@@ -973,6 +973,18 @@ type
   TraceExpandResult* = ref object of RootObj
     tracePath*: string
 
+  # CTFS-M-StaticBlockTrace: parameters for nim/traceStaticBlock.
+  # Mirrors TraceExpandParams; nimsuggest's `tracestatic` command takes the
+  # same file/line/column triple but matches at `evalConstExprAux` entry
+  # points (static: blocks, const initializers, {.compileTime.} proc bodies)
+  # instead of macro expansions.
+  TraceStaticParams* = ref object of RootObj
+    textDocument*: TextDocumentIdentifier
+    position*: Position
+
+  TraceStaticResult* = ref object of RootObj
+    tracePath*: string
+
   InlayHintParams* = ref object of RootObj # TODO: extends WorkDoneProgressParams
     textDocument*: TextDocumentIdentifier
     range*: Range
