@@ -57,6 +57,10 @@ proc registerRoutes(srv: RpcSocketServer, ls: LanguageServer) =
     "textDocument/documentHighlight",
     ls.addRpcToCancellable(wrapRpc(partial(documentHighlight, ls))),
   )
+  srv.register(
+    "textDocument/semanticTokens/range",
+    ls.addRpcToCancellable(wrapRpc(partial(semanticTokensRange, ls))),
+  )
   srv.register("shutdown", wrapRpc(partial(shutdown, ls)))
   srv.register("exit", wrapRpc(partial(exit, (ls: ls, onExit: ls.onExit))))
   #Extension

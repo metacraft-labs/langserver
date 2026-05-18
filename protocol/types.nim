@@ -674,6 +674,11 @@ type
       # boolean | InlayHintOptions | InlayHintRegistrationOptions;
     # diagnosticProvider?: DiagnosticOptions | DiagnosticRegistrationOptions;
     # workspaceSymbolProvider?: boolean | WorkspaceSymbolOptions;
+    # semanticTokensProvider — LSP §3.17.  We currently advertise the
+    # `range` capability only (full-document tokens fall back to client-side
+    # delta).  The legend MUST match the symbol mapping in
+    # `semantic_tokens.nim`; the frontend re-declares the same legend.
+    semanticTokensProvider*: Option[SemanticTokensOptions]
     workspace*: Option[ServerCapabilities_workspace]
     experimental*: OptionalNode
 
@@ -1112,3 +1117,33 @@ type
 
   CancelTestResult* = object
     cancelled*: bool
+
+  # ------------------------------------------------------------------
+  # Semantic tokens (LSP §3.17 / textDocument/semanticTokens/range)
+  # https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_semanticTokens
+  # ------------------------------------------------------------------
+
+  SemanticTokensLegend* = ref object of RootObj
+    tokenTypes*: seq[string]
+    tokenModifiers*: seq[string]
+
+  SemanticTokensRangeServerOptions* = ref object of RootObj
+    ## Wire shape of the server-side `range` capability bit.  LSP allows it
+    ## to be a plain `bool` or an object; we emit the object form because
+    ## several clients (VS Code among them) prefer it.
+    DUMMY*: Option[bool]
+
+  SemanticTokensOptions* = ref object of RootObj
+    legend*: SemanticTokensLegend
+    range*: Option[bool] # only the simple boolean form is needed for now
+    full*: Option[bool]
+
+  SemanticTokensRangeParams* = ref object of RootObj
+    textDocument*: TextDocumentIdentifier
+    range*: Range
+
+  SemanticTokens* = ref object of RootObj
+    ## LSP-shaped response.  `data` is the flattened 5-uint per-token array
+    ## (deltaLine, deltaStartChar, length, tokenType, tokenModifiers).
+    resultId*: Option[string]
+    data*: seq[uint32]

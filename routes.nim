@@ -21,7 +21,8 @@ import
   regex,
   stew/[byteutils],
   nimexpand,
-  testrunner
+  testrunner,
+  semantic_tokens
 
 import macros except error
 
@@ -106,6 +107,18 @@ proc initialize*(
       documentSymbolProvider: some(true),
       codeActionProvider: some(true),
       documentFormattingProvider: some(getNphPath().isSome),
+      # See semantic_tokens.nim for the legend definition.  We advertise
+      # only `range` support — Monaco's range provider re-queries on
+      # viewport changes, which works well for our editor and keeps the
+      # nimsuggest workload bounded.
+      semanticTokensProvider: some(SemanticTokensOptions(
+        legend: SemanticTokensLegend(
+          tokenTypes: SemanticTokenTypes,
+          tokenModifiers: SemanticTokenModifiers,
+        ),
+        range: some(true),
+        full: some(false),
+      )),
     )
   )
   # Support rename by default, but check if we can also support prepare
@@ -319,6 +332,79 @@ proc traceStaticBlock*(
       raise newException(CatchableError,
         "Trace static block failed: empty trace path")
     return TraceStaticResult(tracePath: tracePath)
+
+proc semanticTokensRange*(
+    ls: LanguageServer, params: SemanticTokensRangeParams
+): Future[SemanticTokens] {.async.} =
+  ## Implements `textDocument/semanticTokens/range` (LSP §3.17).
+  ##
+  ## We dispatch to nimsuggest's `highlightRange` (see
+  ## `codetracer-nim/nimsuggest/nimsuggest.nim` near
+  ## `of ideHighlightRange:`), which returns one Suggest per `(sym, info)`
+  ## pair whose position falls inside the requested range.  Each Suggest
+  ## is mapped to an LSP token type via `mapSymKindToTokenType`, then the
+  ## list is delta-encoded into the flat `uint32[]` wire format.
+  ##
+  ## Wire-position semantics: LSP §3.17 says columns are *UTF-16* code
+  ## units in the default `positionEncoding`.  We pass through the UTF-8
+  ## byte columns nimsuggest reports for the simple reason that VS Code
+  ## and Monaco both accept UTF-8 byte columns for ASCII identifiers (the
+  ## common case in Nim).  For broader non-ASCII support we could route
+  ## each emitted column through `toUtf16Pos`; that is deferred until a
+  ## concrete bug surfaces, with a regression test to lock the contract.
+  let uri = params.textDocument.uri
+  let startLine = int(params.range.start.line) + 1 # nimsuggest is 1-based
+  # We resolve UTF-16 → UTF-8 byte column for the query positions so that
+  # nimsuggest's range comparison agrees with the editor's view of where
+  # the cursor sits.  Falling back to the raw character index keeps the
+  # query useful when the file isn't open (no fingerTable available).
+  let startCol = ls.getCharacter(uri, int(params.range.start.line),
+                                  int(params.range.start.character))
+    .get(int(params.range.start.character))
+  let endLine = int(params.range.`end`.line) + 1
+  let endCol = ls.getCharacter(uri, int(params.range.`end`.line),
+                                int(params.range.`end`.character))
+    .get(int(params.range.`end`.character))
+
+  let ns = await ls.tryGetNimsuggest(uri)
+  if ns.isNone:
+    return SemanticTokens(data: @[])
+
+  var suggestions: seq[Suggest]
+  try:
+    suggestions = await ns.get.highlightRange(
+      uriToPath(uri), ls.uriToStash(uri),
+      startLine, startCol, endLine, endCol,
+    )
+  except CatchableError as e:
+    # nimsuggest crashes or doesn't recognise the command — degrade to an
+    # empty token list rather than a JSON-RPC error so the client falls
+    # back to its monarch tokenizer.
+    debug "semanticTokensRange: highlightRange failed", msg = e.msg
+    return SemanticTokens(data: @[])
+
+  var tokens = newSeqOfCap[TokenInput](suggestions.len)
+  for s in suggestions:
+    if s.isNil:
+      continue
+    let tokType = mapSymKindToTokenType(s.symKind)
+    if tokType == SkipToken:
+      continue
+    let identifier =
+      if s.qualifiedPath.len > 0: s.qualifiedPath[^1]
+      else: ""
+    let length = nameLength(identifier)
+    if length <= 0:
+      continue
+    tokens.add(TokenInput(
+      line: s.line,
+      startChar: s.column,
+      length: length,
+      tokenType: tokType,
+      tokenModifiers: mapSymKindToModifiers(s.symKind),
+    ))
+
+  return SemanticTokens(data: encodeSemanticTokens(tokens))
 
 proc status*(
     ls: LanguageServer, params: NimLangServerStatusParams

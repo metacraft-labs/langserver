@@ -6,4 +6,6 @@ import
   tmisc,
   ttestrunner,
   test_trace_expand,
-  test_trace_static
+  test_trace_static,
+  test_semantic_tokens,
+  test_semantic_tokens_integration

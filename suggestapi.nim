@@ -570,6 +570,19 @@ createRangeCommand(inlayHints)
 createFullCommand(traceExpand)
 createFullCommand(traceStatic)
 
+# nimsuggest's `highlightrange` accepts the start position as the regular
+# line/col arguments and the end position embedded in the `tag` extension
+# as `<endLine>:<endCol>`.  See codetracer-nim/nimsuggest/nimsuggest.nim
+# near `of ideHighlightRange:` for the parser on the other side.
+proc highlightRange*(
+    self: Nimsuggest,
+    file: string,
+    dirtyfile = "",
+    startLine, startCol, endLine, endCol: int,
+): Future[seq[Suggest]] =
+  let tag = fmt " {endLine}:{endCol}"
+  return self.call("highlightRange", file, dirtyfile, startLine, startCol, tag)
+
 proc `mod`*(
     nimsuggest: Nimsuggest, file: string, dirtyfile = ""
 ): Future[seq[Suggest]] =
