@@ -45,6 +45,8 @@ proc execNimble*(args: varargs[string]): ProcessOutput =
     cmd = "DYLD_LIBRARY_PATH=/usr/local/opt/openssl@1.1/lib " & cmd
 
   result = execCmdEx(cmd)
+  if result.exitCode != 0:
+    echo "Nimble fixture command failed: ", cmd, "\n", result.output
   checkpoint(cmd)
   checkpoint(result.output)
 

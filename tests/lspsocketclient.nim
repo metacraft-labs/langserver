@@ -74,7 +74,12 @@ proc processMessage(client: LspSocketClient, msg: string) {.raises: [].} =
         error "Method not implemented ", meth = meth
     elif "id" in serverReq: #Response here
       let id = serverReq["id"].jsonTo(int)
-      client.responses[id].complete(serverReq["result"])
+      let response = client.responses[id]
+      client.responses.del(id)
+      if "error" in serverReq:
+        response.fail(newException(JsonRpcError, $serverReq["error"]))
+      else:
+        response.complete(serverReq["result"])
     else:
       error "Unknown msg", msg = msg
   except CatchableError as exc:

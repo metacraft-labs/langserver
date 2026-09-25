@@ -53,9 +53,21 @@ with pkgs;
         gnumake
         latest-nimble
         nim
+        openssl
+        pcre
+        zstd
       ];
 
     shellHook = ''
+      # Nimble's pinned Nim download carries a bundled Nimble that dlopens
+      # OpenSSL; the source-built trace compiler dlopens PCRE and zstd.
+      # Runtime libraries are not found through Nix buildInputs.
+      ${lib.optionalString stdenv.isLinux ''
+        export LD_LIBRARY_PATH="${lib.makeLibraryPath [ openssl pcre zstd ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      ''}
+      ${lib.optionalString stdenv.isDarwin ''
+        export DYLD_FALLBACK_LIBRARY_PATH="${lib.makeLibraryPath [ openssl pcre zstd ]}''${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+      ''}
       figlet "Nim Lang Server"
     '';
   }

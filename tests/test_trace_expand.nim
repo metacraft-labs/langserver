@@ -5,6 +5,7 @@ import json_rpc/[rpcclient]
 import chronicles
 import lspsocketclient
 import unittest2
+import trace_test_config
 
 # NOTE: The success path (test 4) requires a nimsuggest binary that supports
 # the `traceExpand` command. If the installed nimsuggest does not support it,
@@ -16,10 +17,13 @@ suite "TraceExpandMacro":
   let cmdParams = CommandLineParams(transport: some socket, port: getNextFreePort())
   let ls = main(cmdParams)
   let client = newLspSocketClient()
+  if fileExists(resolvedTraceNimsuggestPath):
+    client.register("workspace/configuration", traceConfigHandler)
+  else:
+    client.registerNotification("workspace/configuration")
   client.registerNotification(
     "window/showMessage",
     "window/workDoneProgress/create",
-    "workspace/configuration",
     "extension/statusUpdate",
     "textDocument/publishDiagnostics",
     "$/progress",
@@ -36,6 +40,8 @@ suite "TraceExpandMacro":
     }
   let initResult = waitFor client.initialize(initParams)
   client.notify("initialized", newJObject())
+  if fileExists(resolvedTraceNimsuggestPath):
+    waitFor awaitTraceConfiguration(ls)
 
   test "traceExpandMacro command is registered in server capabilities":
     let commands = initResult.capabilities.executeCommandProvider.get.commands.get
@@ -176,19 +182,6 @@ suite "TraceExpandMacro":
 
 # CTFS magic bytes: 0xC0 0xDE 0x72 0xAC 0xE2
 const CtfsMagic: array[5, byte] = [0xC0'u8, 0xDE, 0x72, 0xAC, 0xE2]
-const TraceNimsuggestPath = currentSourcePath().parentDir().parentDir() /
-  ".." / "codetracer-nim" / "bin" / "nimsuggest_trace"
-
-# Module-level resolved path for the trace-enabled nimsuggest, used by the
-# workspace/configuration route handler below.
-let resolvedTraceNimsuggestPath* = normalizedPath(absolutePath(TraceNimsuggestPath))
-
-proc traceConfigHandler(params: JsonNode): Future[JsonNode] {.async, gcsafe.} =
-  ## Route handler for workspace/configuration that returns config with the
-  ## trace-enabled nimsuggest binary path.
-  {.cast(gcsafe).}:
-    return %*[{"nimsuggestPath": resolvedTraceNimsuggestPath}]
-
 suite "TraceExpandMacro end-to-end (trace-enabled nimsuggest)":
   # This suite requires the trace-enabled nimsuggest binary.
   # It verifies the full round-trip: LSP request -> nimsuggest traceExpand
@@ -229,6 +222,7 @@ suite "TraceExpandMacro end-to-end (trace-enabled nimsuggest)":
       }
     let initResult2 = waitFor client2.initialize(initParams2)
     client2.notify("initialized", newJObject())
+    waitFor awaitTraceConfiguration(ls2)
 
     test "end-to-end: macro file returns .ct path with valid CTFS magic":
       let macroFile = "projects/macrotest/macrotest.nim"

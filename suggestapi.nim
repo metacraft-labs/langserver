@@ -45,6 +45,7 @@ type
     ideType
     ideExpand
     ideTraceExpand
+    ideTraceStatic
 
   NimsuggestCallback* = proc(self: Nimsuggest): void {.gcsafe, raises: [].}
   ProjectCallback* = proc(self: Project): void {.gcsafe, raises: [].}

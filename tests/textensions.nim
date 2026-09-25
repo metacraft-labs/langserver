@@ -77,8 +77,12 @@ suite "Nimlangserver extensions":
     #We first need to initialize the nimble project
     let projectDir = getCurrentDir() / "tests" / "projects" / "testrunner"
     cd projectDir:
-      let (output, _) = execNimble("install", "-l")
-      discard execNimble("setup")
+      let (installOutput, installExit) = execNimbleYes("install", "-l")
+      checkpoint installOutput
+      require installExit == 0
+      let (setupOutput, setupExit) = execNimbleYes("setup", "-l")
+      checkpoint setupOutput
+      require setupExit == 0
 
     let initParams =
       InitializeParams %* {

@@ -11,7 +11,7 @@ bin           = @["tasks"]
 
 # Dependencies
 
-requires "nim >= 2.1.99"
+requires "nim >= 2.0.8"
 
 task helloWorld, "hello world":
   echo "hello world"

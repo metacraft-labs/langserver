@@ -5,6 +5,7 @@ import json_rpc/[rpcclient]
 import chronicles
 import lspsocketclient
 import unittest2
+import trace_test_config
 
 # Mirrors `test_trace_expand.nim` but exercises the `nim/traceStaticBlock`
 # route added for CTFS-M-StaticBlockTrace.
@@ -19,10 +20,13 @@ suite "TraceStaticBlock":
   let cmdParams = CommandLineParams(transport: some socket, port: getNextFreePort())
   let ls = main(cmdParams)
   let client = newLspSocketClient()
+  if fileExists(resolvedTraceNimsuggestPath):
+    client.register("workspace/configuration", traceConfigHandler)
+  else:
+    client.registerNotification("workspace/configuration")
   client.registerNotification(
     "window/showMessage",
     "window/workDoneProgress/create",
-    "workspace/configuration",
     "extension/statusUpdate",
     "textDocument/publishDiagnostics",
     "$/progress",
@@ -39,6 +43,8 @@ suite "TraceStaticBlock":
     }
   let initResult = waitFor client.initialize(initParams)
   client.notify("initialized", newJObject())
+  if fileExists(resolvedTraceNimsuggestPath):
+    waitFor awaitTraceConfiguration(ls)
 
   test "traceStaticBlock command is registered in server capabilities":
     let commands = initResult.capabilities.executeCommandProvider.get.commands.get

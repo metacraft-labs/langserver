@@ -163,6 +163,14 @@ proc runRpc(ls: LanguageServer, req: RequestRx, rpc: RpcProc): Future[void] {.as
   except CatchableError as ex:
     error "[RunRPC] ", msg = ex.msg, req = req.`method`
     writeStackTrace(ex = ex)
+    # A logged failure is not a response: the caller otherwise waits forever.
+    # Notifications have no request ID and must remain response-free.
+    if req.id.kind != riNull:
+      let id = if req.id.kind == riNumber: %req.id.num else: %req.id.str
+      ls.writeOutput(%*{
+        "jsonrpc": "2.0", "id": id,
+        "error": {"code": -32603, "message": ex.msg}
+      })
 
 proc processMessage(ls: LanguageServer, message: string) {.raises: [].} =
   try:

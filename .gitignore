@@ -10,3 +10,6 @@ nimble.develop
 nimble.paths
 nimbledeps
 dprint.json
+
+# Repro development environment cache
+.repro/
