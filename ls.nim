@@ -293,8 +293,10 @@ proc getNimbleDumpInfo*(
       nimbleFile = result.nimblePath.get
     if nimbleFile != "":
       ls.nimDumpCache[nimbleFile] = result
-  except OSError, IOError:
-    debug "Failed to get nimble dump info", nimbleFile = nimbleFile
+  except CatchableError as ex:
+    # chronos reports a missing `nimble` as an AsyncProcessError, which is
+    # neither an OSError nor an IOError.
+    debug "Failed to get nimble dump info", nimbleFile = nimbleFile, error = ex.msg
   finally:
     await shutdownChildProcess(process)
 

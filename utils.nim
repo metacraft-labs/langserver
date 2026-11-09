@@ -343,6 +343,10 @@ proc getNimScriptAPITemplatePath*(): string =
   debug "NimScriptApiPath", path = result
 
 proc shutdownChildProcess*(p: AsyncProcessRef): Future[void] {.async.} =
+  # `startProcess` raises when the executable cannot be found, which leaves the
+  # caller's handle nil; there is nothing to shut down then.
+  if p.isNil:
+    return
   try:
     debug "Shutting down process with pid: ", pid = p.processID()
     let exitCode = await p.terminateAndWaitForExit(2.seconds)

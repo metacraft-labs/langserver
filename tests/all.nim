@@ -1,5 +1,6 @@
 import
   tsuggestapi,
+  tnimbledump,
   tnimlangserver,
   tprojectsetup,
   textensions,
