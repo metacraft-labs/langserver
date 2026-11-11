@@ -219,7 +219,10 @@ proc initActions*(ls: LanguageServer) =
     case ls.transportMode
     of stdio:
       ls.outStream.close()
-      freeShared(ls.stdinContext)
+      # End the process here, as `exit` asks (0 after `shutdown`, else 1).
+      # Freeing `stdinContext` instead, while the stdin reader thread still
+      # used it, crashed the server with SIGSEGV after every `exit`.
+      quit(if ls.isShutdown: 0 else: 1)
     of socket:
       ls.srv.close()
 

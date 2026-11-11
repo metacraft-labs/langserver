@@ -1217,3 +1217,4 @@ proc didChangeConfiguration*(
       ls.workspaceConfiguration = newFuture[JsonNode]()
       ls.workspaceConfiguration.complete(conf)
       handleConfigurationChanges(ls, oldConfiguration, newConfiguration)
+      ls.restartNimsuggestOnPathChange(newConfiguration)

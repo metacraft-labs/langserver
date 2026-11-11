@@ -491,6 +491,26 @@ proc getNimVersion(nimDir: string): string =
     if line.startsWith(NimCompilerVersion):
       return line
 
+const CodetracerNimsuggestVar* = "CODETRACER_NIMSUGGEST"
+  ## Where CodeTracer's environment names its trace-enabled nimsuggest. The
+  ## CodeTracer dev shell exports it and keeps that nimsuggest off `PATH`
+  ## (the `PATH` one is stock and answers no trace queries).
+
+proc codetracerNimsuggest*(): string =
+  ## The trace-enabled nimsuggest `CODETRACER_NIMSUGGEST` names, or "" when it
+  ## names none or a file that is not there.
+  let path = expandTilde(getEnv(CodetracerNimsuggestVar))
+  if path.len > 0 and fileExists(path): path else: ""
+
+proc configuredNimsuggestPath*(conf: NlsConfig): string =
+  ## The nimsuggest a configuration asks for: its own `nimsuggestPath`, else
+  ## CodeTracer's trace-enabled one, else "" (found later from the project's
+  ## Nim or `PATH`). A client that names no nimsuggest, such as CodeTracer's
+  ## desktop, still gets one that answers `traceExpand` / `traceStatic`.
+  result = expandTilde(conf.nimsuggestPath.get(""))
+  if result == "":
+    result = codetracerNimsuggest()
+
 proc getNimSuggestPathAndVersion(
     ls: LanguageServer, conf: NlsConfig, workingDir: string
 ): Future[(string, string)] {.async.} =
@@ -498,7 +518,7 @@ proc getNimSuggestPathAndVersion(
   let nimbleDumpInfo = await ls.getNimbleDumpInfo("")
   let nimDir = nimbleDumpInfo.nimDir.get ""
 
-  var nimsuggestPath = expandTilde(conf.nimsuggestPath.get(""))
+  var nimsuggestPath = configuredNimsuggestPath(conf)
   var nimVersion = ""
   if nimsuggestPath == "":
     if nimDir != "" and nimDir.dirExists:
@@ -1115,6 +1135,26 @@ proc handleConfigurationChanges*(
     debug "Sending inlayHint refresh"
     ls.inlayHintsRefreshRequest = ls.call("workspace/inlayHint/refresh", newJNull())
 
+proc restartNimsuggestOnPathChange*(ls: LanguageServer, conf: NlsConfig) =
+  ## Restart every running nimsuggest that is not the one `conf` asks for.
+  ## A nimsuggest can be started before the client has answered
+  ## `workspace/configuration` (a document opened at once), and then runs the
+  ## default one; without this it kept running it, so a `nimsuggestPath` that
+  ## arrived a moment later was never used.
+  let wanted = configuredNimsuggestPath(conf)
+  if wanted == "":
+    return
+  var stale: seq[string] = @[]
+  for projectFile, project in ls.projectFiles:
+    if project.ns.finished and not project.ns.failed:
+      let running = project.ns.read.nimSuggestPath
+      if running != wanted:
+        debug "Restarting nimsuggest for a new nimsuggestPath",
+          projectFile = projectFile, running = running, wanted = wanted
+        stale.add projectFile
+  for projectFile in stale:
+    ls.createOrRestartNimsuggest(projectFile, projectFile.pathToUri)
+
 proc maybeRequestConfigurationFromClient*(ls: LanguageServer) =
   if ls.supportsConfigurationRequest:
     debug "Requesting configuration from the client"
@@ -1127,6 +1167,8 @@ proc maybeRequestConfigurationFromClient*(ls: LanguageServer) =
       if futConfiguration.error.isNil:
         debug "Received the following configuration",
           configuration = futConfiguration.read()
+        ls.restartNimsuggestOnPathChange(
+          parseWorkspaceConfiguration(futConfiguration.read))
         if not isNil(ls.prevWorkspaceConfiguration) and
             ls.prevWorkspaceConfiguration.finished:
           let

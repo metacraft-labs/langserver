@@ -1,6 +1,7 @@
 import
   tsuggestapi,
   tnimbledump,
+  tcodetracer_nimsuggest,
   tnimlangserver,
   tprojectsetup,
   textensions,
