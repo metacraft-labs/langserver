@@ -47,6 +47,10 @@ type
     ideTraceExpand
     ideTraceStatic
 
+  NimsuggestStoppedError* = object of CatchableError
+    ## A request reached a nimsuggest that was stopped on purpose (a restart)
+    ## before it answered. The answer it would have given is lost, not empty.
+
   NimsuggestCallback* = proc(self: Nimsuggest): void {.gcsafe, raises: [].}
   ProjectCallback* = proc(self: Project): void {.gcsafe, raises: [].}
 
@@ -116,6 +120,8 @@ type
     errorCallback*: Option[ProjectCallback]
     errorMessage*: string
     failed*: bool
+    stopped*: bool
+      ## Stopped on purpose (`stop`), so its process ending is not a failure.
     lastCmd*: string
     lastCmdDate*: Option[DateTime]
 
@@ -265,11 +271,15 @@ proc name*(sug: Suggest): string =
 proc markFailed(self: Project, errMessage: string) {.raises: [].} =
   self.failed = true
   self.errorMessage = errMessage
-  if self.errorCallback.isSome:
+  # A project stopped on purpose ends its process; that is not a crash to
+  # report or recover from. Reporting it restarted the project a second time,
+  # replacing the instance the restart had just started.
+  if self.errorCallback.isSome and not self.stopped:
     self.errorCallback.get()(self)
 
 proc stop*(self: Project) =
   debug "Stopping nimsuggest for ", root = self.file
+  self.stopped = true
   if not self.process.isNil:
     asyncSpawn shutdownChildProcess(self.process)
 
@@ -332,7 +342,10 @@ proc getNimsuggestCapabilities*(
 
 proc logNsError(project: Project) {.async.} =
   let err = string.fromBytes(project.process.stderrStream.read().await)
-  error "NimSuggest Error (stderr)", err = err
+  if project.stopped:
+    debug "Stopped nimsuggest exited", root = project.file, err = err
+  else:
+    error "NimSuggest Error (stderr)", err = err
   project.markFailed(err)
 
 proc createNimsuggest*(
@@ -438,6 +451,11 @@ proc processQueue(self: Nimsuggest): Future[void] {.async.} =
       command = req.commandString
     if req.future.finished:
       debug "Call cancelled before executed", command = req.command
+    elif self.project.stopped:
+      debug "Nimsuggest was stopped, failing the queued request", port = self.port
+      req.future.fail newException(
+        NimsuggestStoppedError, "nimsuggest was stopped before it answered"
+      )
     elif self.project.failed:
       debug "Nimsuggest is not working, returning empty result...", port = self.port
       req.future.complete @[]
@@ -454,14 +472,26 @@ proc processQueue(self: Nimsuggest): Future[void] {.async.} =
               debug "Calling restart"
               self.timeoutCallback(self)
         let ta = initTAddress(&"127.0.0.1:{self.port}")
-        let transport = await ta.connect()
-        discard await transport.write(req.commandString & "\c\L")
-
-        const bufferSize = 1024 * 1024 * 4
-        var buffer: seq[byte] = newSeq[byte](bufferSize)
-
-        var data = await transport.read()
-        let content = data.toString()
+        var transport: StreamTransport
+        var content: string
+        try:
+          transport = await ta.connect()
+          discard await transport.write(req.commandString & "\c\L")
+          content = (await transport.read()).toString()
+        except CatchableError as ex:
+          # The process is gone (stopped by a restart, or crashed) before or
+          # while it answered. Fail the request instead of leaving it pending
+          # for good, and with what the caller needs to tell the two apart.
+          if not transport.isNil:
+            transport.close()
+          if not req.future.finished:
+            if self.project.stopped:
+              req.future.fail newException(
+                NimsuggestStoppedError, "nimsuggest was stopped before it answered"
+              )
+            else:
+              req.future.fail newException(CatchableError, ex.msg)
+          continue
 
         for lineStr in content.splitLines:
           if lineStr != "":
@@ -483,9 +513,14 @@ proc processQueue(self: Nimsuggest): Future[void] {.async.} =
           debug "Server socket closed"
           if not req.future.finished:
             debug "Call cancelled before sending error", command = req.command
-            req.future.fail newException(
-              CatchableError, "Server crashed/socket closed."
-            )
+            if self.project.stopped:
+              req.future.fail newException(
+                NimsuggestStoppedError, "nimsuggest was stopped before it answered"
+              )
+            else:
+              req.future.fail newException(
+                CatchableError, "Server crashed/socket closed."
+              )
         if not req.future.finished:
           debug "Sending result(s)", length = res.len
           req.future.complete res

@@ -182,6 +182,9 @@ type
       #Project file to fail count
       #List of errors (crashes) nimsuggest has had since the lsp session started
     checkInProgress*: bool
+    restarts*: Table[string, Future[void]]
+      #Project file to the restart of its nimsuggest still in progress; completed
+      #once the new instance is in `projectFiles`.
 
   Certainty* = enum
     None
@@ -784,10 +787,19 @@ proc createOrRestartNimsuggest*(
   ls: LanguageServer, projectFile: string, uri = ""
 ) {.gcsafe, raises: [].}
 
+proc waitForRestart*(ls: LanguageServer, projectFile: string) {.async.} =
+  ## Returns once no restart of `projectFile`'s nimsuggest is in progress. A
+  ## restart runs the old instance until the new one has started, so a query
+  ## that asked during that window would be answered by the instance being
+  ## replaced, which may be a different nimsuggest (one that cannot trace).
+  while projectFile in ls.restarts:
+    await ls.restarts[projectFile]
+
 proc getNimsuggestInner(ls: LanguageServer, uri: string): Future[Nimsuggest] {.async.} =
   assert uri in ls.openFiles, "File not open"
 
   let projectFile = await ls.openFiles[uri].projectFile
+  await ls.waitForRestart(projectFile)
   if not ls.projectFiles.hasKey(projectFile):
     debug "Creating new nimsuggest instance", uri = uri, projectFile = projectFile
     ls.createOrRestartNimsuggest(projectFile, uri)
@@ -1041,6 +1053,16 @@ proc onErrorCallback(args: (LanguageServer, string), project: Project) =
 proc createOrRestartNimsuggest*(
     ls: LanguageServer, projectFile: string, uri = ""
 ) {.gcsafe, raises: [].} =
+  # A restart: queries for this project wait (`waitForRestart`) until the new
+  # instance replaces the running one, instead of being served by the old one.
+  var restart: Future[void]
+  if projectFile in ls.projectFiles and projectFile notin ls.restarts:
+    restart = newFuture[void]("createOrRestartNimsuggest")
+    ls.restarts[projectFile] = restart
+  defer:
+    if not restart.isNil:
+      ls.restarts.del projectFile
+      restart.complete()
   try:
     debug "Starting createOrRestartNimsuggest", projectFile = projectFile, uri = uri
     let

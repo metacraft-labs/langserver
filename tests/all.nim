@@ -2,6 +2,7 @@ import
   tsuggestapi,
   tnimbledump,
   tcodetracer_nimsuggest,
+  tnimsuggest_restart,
   tnimlangserver,
   tprojectsetup,
   textensions,

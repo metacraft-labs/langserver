@@ -270,10 +270,19 @@ proc expand*(
         range: expand[0].createRangeFromSuggest(),
       )
 
-proc traceExpandMacro*(
-    ls: LanguageServer, params: TraceExpandParams
-): Future[TraceExpandResult] {.async.} =
-  with (params.position, params.textDocument):
+proc traceQuery(
+    ls: LanguageServer, command, uri: string, line, character: int
+): Future[seq[Suggest]] {.async.} =
+  ## Runs a trace query (`traceExpand` / `traceStatic`) on the file's
+  ## nimsuggest. A restart can replace that nimsuggest while the query runs on
+  ## it (a configuration naming another nimsuggest, or a timeout). The old
+  ## instance's answer is then not an answer about the code: it was stopped
+  ## under the query, or it is a different nimsuggest that may not trace at
+  ## all (the stock one a configuration is replacing). So when the instance
+  ## that answered is no longer, or is about to stop being, the project's
+  ## nimsuggest, and it gave no result, the query runs again on its successor.
+  const MaxRestarts = 3
+  for attempt in 0 .. MaxRestarts:
     let ns = await ls.tryGetNimsuggest(uri)
     if ns.isNone:
       raise newException(CatchableError,
@@ -282,12 +291,35 @@ proc traceExpandMacro*(
     if ch.isNone:
       raise newException(CatchableError,
         "Unable to resolve character position")
-    let results =
-      try:
-        await ns.get.traceExpand(uriToPath(uri), ls.uriToStash(uri), line + 1, ch.get)
-      except CatchableError as e:
+    let served = ns.get
+    var results: seq[Suggest]
+    try:
+      results = await served.call(
+        command, uriToPath(uri), ls.uriToStash(uri), line + 1, ch.get)
+    except NimsuggestStoppedError:
+      discard
+    except CatchableError as e:
+      if not served.project.stopped:
         raise newException(CatchableError,
-          "nimsuggest does not support traceExpand: " & e.msg)
+          "nimsuggest does not support " & command & ": " & e.msg)
+    if results.len > 0:
+      return results
+    let projectFile = await ls.openFiles[uri].projectFile
+    let replaced =
+      served.project.stopped or projectFile in ls.restarts or
+      ls.projectFiles.getOrDefault(projectFile) != served.project
+    if not replaced:
+      return results
+    debug "nimsuggest was restarted under a trace query; asking the new one",
+      command = command, uri = uri, attempt = attempt
+  raise newException(CatchableError,
+    "nimsuggest kept restarting while " & command & " ran")
+
+proc traceExpandMacro*(
+    ls: LanguageServer, params: TraceExpandParams
+): Future[TraceExpandResult] {.async.} =
+  with (params.position, params.textDocument):
+    let results = await ls.traceQuery("traceExpand", uri, line, character)
     if results.len == 0:
       raise newException(CatchableError,
         "No trace result at this position (not a macro call?)")
@@ -308,21 +340,7 @@ proc traceStaticBlock*(
   ##
   ## See `codetracer-nim` commit `df227efd0` for the nimsuggest side.
   with (params.position, params.textDocument):
-    let ns = await ls.tryGetNimsuggest(uri)
-    if ns.isNone:
-      raise newException(CatchableError,
-        "nimsuggest is not available for this file")
-    let ch = ls.getCharacter(uri, line, character)
-    if ch.isNone:
-      raise newException(CatchableError,
-        "Unable to resolve character position")
-    let results =
-      try:
-        await ns.get.traceStatic(
-          uriToPath(uri), ls.uriToStash(uri), line + 1, ch.get)
-      except CatchableError as e:
-        raise newException(CatchableError,
-          "nimsuggest does not support traceStatic: " & e.msg)
+    let results = await ls.traceQuery("traceStatic", uri, line, character)
     if results.len == 0:
       raise newException(CatchableError,
         "No trace result at this position " &
