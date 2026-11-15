@@ -1,3 +1,7 @@
+## Tests for how the server maps files to projects, against a real server on
+## a socket. "nimble setup" creates its project with the real `nimble init`,
+## so it needs a working `nimble` on PATH (see `requireNimble` in
+## testhelpers.nim). Nothing is mocked.
 import ../[nimlangserver, ls, lstransports, utils]
 import ../protocol/[enums, types]
 import
@@ -22,10 +26,15 @@ suite "nimble setup":
     "textDocument/publishDiagnostics", "$/progress",
   )
   let testProjectDir = absolutePath "tests" / "projects" / "testproject"
+  # Set by the first case once it has created the project and initialized the
+  # server with it; the second case builds on both.
+  var projectReady = false
 
   test "should pick `testproject.nim` as the main file and provide suggestions":
+    requireNimble()
     let entryPoint = testProjectDir / "src" / "testproject.nim"
-    createNimbleProject(testProjectDir)
+    if not createNimbleProject(testProjectDir):
+      failTest("`nimble init` did not create " & testProjectDir)
     let initParams =
       InitializeParams %* {
         "processId": %getCurrentProcessId(),
@@ -34,6 +43,7 @@ suite "nimble setup":
           {"window": {"workDoneProgress": true}, "workspace": {"configuration": true}},
       }
     discard waitFor client.initialize(initParams)
+    projectReady = true
    
     check waitFor client.waitForNotificationMessage(
       fmt"Nimsuggest initialized for {entryPoint}",
@@ -65,6 +75,15 @@ suite "nimble setup":
 
   test "`submodule.nim` should not be part of the nimble project file":
     let submodule = testProjectDir / "src" / "testproject" / "submodule.nim"
+    # This case opens a file of the project the previous case creates with
+    # `nimble init`, on the server that case initialized. Without both, say so
+    # instead of failing with an IOError (or, with a stale project left by an
+    # earlier run, sending didOpen to a server that was never initialized).
+    if not projectReady:
+      failTest(
+        "The previous case did not create and open " & testProjectDir &
+          " (see its failure)."
+      )
     client.notify(
       "textDocument/didOpen",
       %createDidOpenParams("projects/testproject/src/testproject/submodule.nim"),

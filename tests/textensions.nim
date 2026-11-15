@@ -1,3 +1,9 @@
+## End-to-end tests for the `extension/*` requests, through a real server on
+## a socket and the real `nimble`, `nim` and nimsuggest. Nothing is mocked; the
+## failure cases use a fixture whose .nimble file really does not evaluate
+## (tests/projects/brokentasks) and a PATH that really holds no `nimble`.
+## The nimble-dependent cases need a working `nimble` on PATH and fail with
+## `nimbleProblem`'s message when there is none (see testhelpers.nim).
 import ../[nimlangserver, ls, lstransports, utils]
 import ../protocol/[enums, types]
 import
@@ -52,6 +58,7 @@ suite "Nimlangserver extensions":
     check prevSuggestPid != suggestPid
 
   test "calling extension/tasks should return all existing tasks":
+    requireNimble()
     let initParams =
       InitializeParams %* {
         "processId": %getCurrentProcessId(),
@@ -73,16 +80,72 @@ suite "Nimlangserver extensions":
     check tasks[0].name == "helloWorld"
     check tasks[0].description == "hello world"
 
+  test "calling extension/tasks when nimble fails should return nimble's error":
+    requireNimble()
+    # brokentasks.nimble calls an undeclared identifier, so the real
+    # `nimble tasks` fails to evaluate it and exits non-zero. The server must
+    # report that as a JSON-RPC error carrying nimble's own message rather
+    # than answer with an empty task list.
+    let initParams =
+      InitializeParams %* {
+        "processId": %getCurrentProcessId(),
+        "rootUri": fixtureUri("projects/brokentasks/"),
+        "capabilities":
+          {"window": {"workDoneProgress": true}, "workspace": {"configuration": true}},
+      }
+    discard waitFor client.initialize(initParams)
+
+    var errorMessage = ""
+    try:
+      let res = client.call("extension/tasks", jsonutils.toJson(())).waitFor()
+      checkpoint "extension/tasks answered instead of failing: " & $res
+    except JsonRpcError as e:
+      errorMessage = e.msg
+    checkpoint errorMessage
+    check "thisProcDoesNotExistInNimScript" in errorMessage
+
+  test "calling extension/tasks without nimble on PATH should return an error":
+    # The server runs in this process, so emptying PATH here leaves it no
+    # `nimble` to start. Starting the process then fails; the client must get
+    # an error naming the command instead of an empty list or a crash.
+    let initParams =
+      InitializeParams %* {
+        "processId": %getCurrentProcessId(),
+        "rootUri": fixtureUri("projects/tasks/"),
+        "capabilities":
+          {"window": {"workDoneProgress": true}, "workspace": {"configuration": true}},
+      }
+    discard waitFor client.initialize(initParams)
+
+    let emptyDir = getTempDir() / "nls-no-nimble-tasks-" & $getCurrentProcessId()
+    createDir(emptyDir)
+    let oldPath = getEnv("PATH")
+    putEnv("PATH", emptyDir)
+    defer:
+      putEnv("PATH", oldPath)
+      removeDir(emptyDir)
+    var errorMessage = ""
+    try:
+      let res = client.call("extension/tasks", jsonutils.toJson(())).waitFor()
+      checkpoint "extension/tasks answered instead of failing: " & $res
+    except JsonRpcError as e:
+      errorMessage = e.msg
+    checkpoint errorMessage
+    check "Could not run `nimble tasks`" in errorMessage
+
   test "calling extension/listTests should return all existing tests":
+    requireNimble()
     #We first need to initialize the nimble project
     let projectDir = getCurrentDir() / "tests" / "projects" / "testrunner"
     cd projectDir:
       let (installOutput, installExit) = execNimbleYes("install", "-l")
       checkpoint installOutput
-      require installExit == 0
+      if installExit != 0:
+        failTest("`nimble install -l` exited with code " & $installExit)
       let (setupOutput, setupExit) = execNimbleYes("setup", "-l")
       checkpoint setupOutput
-      require setupExit == 0
+      if setupExit != 0:
+        failTest("`nimble setup -l` exited with code " & $setupExit)
 
     let initParams =
       InitializeParams %* {
@@ -105,6 +168,7 @@ suite "Nimlangserver extensions":
     check testProjectInfo.suites["Sample Tests"].tests[0].line == 4
 
   test "calling extension/runTests should run the tests and return the results":
+    requireNimble() # needs the dependencies listTests installs
     let initParams =
       InitializeParams %* {
         "processId": %getCurrentProcessId(),
@@ -127,6 +191,7 @@ suite "Nimlangserver extensions":
     check runTestsRes.suites[0].time > 0.0 and runTestsRes.suites[0].time < 1.0
 
   test "calling extension/runTest with a suite name should run the tests in the suite":
+    requireNimble() # needs the dependencies listTests installs
     let initParams =
       InitializeParams %* {
         "processId": %getCurrentProcessId(),
@@ -146,6 +211,7 @@ suite "Nimlangserver extensions":
     check runTestsRes.suites[0].tests == 3
 
   test "calling extension/runTest with a test name should run the tests in the suite":
+    requireNimble() # needs the dependencies listTests installs
     let initParams =
       InitializeParams %* {
         "processId": %getCurrentProcessId(),
@@ -165,6 +231,7 @@ suite "Nimlangserver extensions":
     check runTestsRes.suites[0].testResults[0].name == testName
 
     test "calling extension/runTest with multiple test names should run the tests in the suite":
+      requireNimble() # needs the dependencies listTests installs
       let initParams =
         InitializeParams %* {
           "processId": %getCurrentProcessId(),
@@ -182,6 +249,7 @@ suite "Nimlangserver extensions":
   #   check runTestsRes.suites[0].tests == 2
 
   test "calling extension/runTest with a failing test should return the failure":
+    requireNimble() # needs the dependencies listTests installs
     let initParams =
       InitializeParams %* {
         "processId": %getCurrentProcessId(),

@@ -1035,17 +1035,36 @@ proc tasks*(ls: LanguageServer, conf: JsonNode): Future[seq[NimbleTask]] {.async
   let rootPath: string = ls.initializeParams.getRootPath
   debug "Received tasks ", rootPath = rootPath
   delEnv "NIMBLE_DIR"
-  let process = await ls.startNimbleProcess(@["tasks"])
-  let res =
-    await process.waitForExit(InfiniteDuration) #TODO handle error (i.e. no nimble file)
-  let output = await process.stdoutStream.readLine()
-  var name, desc: string
-  for line in output.splitLines:
-    if scanf(line, "$+  $*", name, desc):
-      #first run of nimble tasks can compile nim and output the result of the compilation
-      if name.isWord:
-        result.add NimbleTask(name: name.strip(), description: desc.strip())
-  await process.shutdownChildProcess()
+  var process: AsyncProcessRef
+  try:
+    try:
+      process = await ls.startNimbleProcess(@["tasks"])
+    except AsyncProcessError as ex:
+      # Typically `nimble` is not on the PATH; name the command that failed.
+      raise newException(
+        CatchableError, &"Could not run `nimble tasks` in {rootPath}: {ex.msg}"
+      )
+    let exitCode = await process.waitForExit(InfiniteDuration)
+    let output = await process.stdoutStream.readLine()
+    if exitCode != 0:
+      # A failing `nimble tasks` (e.g. a .nimble file that does not evaluate)
+      # must reach the client as an error carrying nimble's own message, not
+      # as an empty task list. Nimble prints its errors on stderr.
+      let errorOutput = string.fromBytes(await process.stderrStream.read())
+      raise newException(
+        CatchableError,
+        &"`nimble tasks` in {rootPath} exited with code {exitCode}:\n" &
+          errorOutput & output,
+      )
+    var name, desc: string
+    for line in output.splitLines:
+      if scanf(line, "$+  $*", name, desc):
+        #first run of nimble tasks can compile nim and output the result of the compilation
+        if name.isWord:
+          result.add NimbleTask(name: name.strip(), description: desc.strip())
+  finally:
+    # nil when startProcess failed; shutdownChildProcess handles that.
+    await process.shutdownChildProcess()
 
 proc runTask*(
     ls: LanguageServer, params: RunTaskParams

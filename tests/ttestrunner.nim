@@ -1,3 +1,7 @@
+## Tests for listing and running a project's unittest2 tests, against the
+## tests/projects/testrunner fixture. Its dependencies are installed with the
+## real `nimble install -l`, so these cases need a working `nimble` on PATH
+## (see `requireNimble` in testhelpers.nim). Nothing is mocked.
 import std/[os, osproc, strscans, tables, sequtils, enumerate, strutils, options]
 import testhelpers
 import testrunner
@@ -9,14 +13,17 @@ suite "Test Parser":
   test "should be able to list tests from an entry point":
     #A project can have multiple entry points for the tests, they are specified in the test runner.
     #We first need to install the project, as it uses a custom version of unittest2 (until it get merged).
+    requireNimble()
     let projectDir = getCurrentDir() / "tests" / "projects" / "testrunner"
     cd projectDir:
       let (installOutput, installExit) = execNimbleYes("install", "-l")
       checkpoint installOutput
-      require installExit == 0
+      if installExit != 0:
+        failTest("`nimble install -l` exited with code " & $installExit)
       let (setupOutput, setupExit) = execNimbleYes("setup", "-l")
       checkpoint setupOutput
-      require setupExit == 0
+      if setupExit != 0:
+        failTest("`nimble setup -l` exited with code " & $setupExit)
       let (listTestsOutput, _) = execCmdEx("nim c -d:unittest2ListTests -r ./tests/test1.nim")
       let testProjectInfo = extractTestInfo(listTestsOutput)     
       check testProjectInfo.suites.len == 1
@@ -26,6 +33,7 @@ suite "Test Parser":
       check testProjectInfo.suites["test1.nim"].tests[0].line == 10
 
   test "should be able to list tests and suites":
+    requireNimble() # compiles against the unittest2 the first case installs
     let projectDir = getCurrentDir() / "tests" / "projects" / "testrunner"
     cd projectDir:
       let (listTestsOutput, _) = execCmdEx("nim c -d:unittest2ListTests -r ./tests/sampletests.nim")
@@ -40,6 +48,7 @@ suite "Test Parser":
 
 suite "Test Runner":
   test "should be able to run tests and retrieve results":
+    requireNimble() # compiles against the unittest2 the first case installs
     let entryPoint = getCurrentDir() / "tests" / "projects" / "testrunner" / "tests" / "sampletests.nim"
     let ls = LanguageServer()
     let testProjectResult = waitFor runTests(entryPoint, "nim", none(string), @[], "", ls)

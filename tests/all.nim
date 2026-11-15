@@ -1,6 +1,7 @@
 import
   tsuggestapi,
   tnimbledump,
+  tnimbleprerequisite,
   tcodetracer_nimsuggest,
   tnimsuggest_restart,
   tnimlangserver,
