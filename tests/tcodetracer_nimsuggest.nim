@@ -25,12 +25,6 @@ import lspsocketclient
 import unittest2
 import trace_test_config
 
-proc traceNimsuggest(): string =
-  let named = getEnv(CodetracerNimsuggestVar)
-  if named.len > 0 and fileExists(named): named
-  elif fileExists(resolvedTraceNimsuggestPath): resolvedTraceNimsuggestPath
-  else: ""
-
 suite "the nimsuggest a configuration asks for":
   let saved = getEnv(CodetracerNimsuggestVar)
   let dir = getTempDir() / ("nls-ct-nimsuggest-" & $getCurrentProcessId())

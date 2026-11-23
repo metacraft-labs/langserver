@@ -5,18 +5,34 @@
 ## and asserts the on-wire payload matches our SymKind → token-type
 ## mapping.
 ##
-## These tests depend on a nimsuggest binary that supports the
-## `highlightRange` ide-command introduced in codetracer-nim.  When the
-## binary on `$PATH` does not, the response is empty and the per-symbol
-## assertions skip with a checkpoint so the suite stays green on machines
-## without our fork installed.
+## Nothing is mocked. The route needs nimsuggest's `highlightRange` verb,
+## which only the trace-enabled nimsuggest built from codetracer-nim has, so
+## the suite runs against that one (`trace_test_config.traceNimsuggest`:
+## `CODETRACER_NIMSUGGEST`, else the sibling build), exactly as CodeTracer's
+## dev shell does. It skips only when this machine has no such nimsuggest,
+## and says so. With one present, an empty or missing answer FAILS: the
+## suite used to skip on "no tokens", and ran against the `PATH` nimsuggest,
+## which hid that the server never answered a range request at all (it could
+## not parse nimsuggest's `highlightRange` rows, and the failure stranded
+## every request queued after it).
+##
+## Every call is bounded by `AnswerTimeout`, so a server that stops
+## answering fails the case instead of hanging the run.
 
 import ../[nimlangserver, ls, lstransports, utils, semantic_tokens]
 import ../protocol/types
-import std/[options, json, os, strformat, sets]
+import std/[options, json, os, strformat, strutils, sets]
 import chronos
 import lspsocketclient
 import unittest2
+import trace_test_config
+
+const AnswerTimeout = chronos.seconds(60)
+
+proc callBounded(client: LspSocketClient, name: string, params: JsonNode): JsonNode =
+  ## One request, answered within `AnswerTimeout` or failed with
+  ## `AsyncTimeoutError` naming nothing more than the wait.
+  waitFor client.call(name, params).wait(AnswerTimeout)
 
 type
   DecodedTok = object
@@ -55,6 +71,10 @@ proc anyTokenMatches(toks: seq[DecodedTok], line: int, tokenType: string): bool 
   false
 
 suite "SemanticTokensRange":
+  let traceNs = traceNimsuggest()
+  let savedNs = getEnv(CodetracerNimsuggestVar)
+  if traceNs.len > 0:
+    putEnv(CodetracerNimsuggestVar, traceNs)
   let cmdParams = CommandLineParams(transport: some socket, port: getNextFreePort())
   let ls = main(cmdParams)
   let client = newLspSocketClient()
@@ -80,6 +100,28 @@ suite "SemanticTokensRange":
   let initResult = waitFor client.initialize(initParams)
   client.notify("initialized", newJObject())
 
+  # Restored once the suite is done, not after each case: the fixture's
+  # nimsuggest is started between cases (on `didOpen` below) and must find
+  # the trace-enabled one in the environment.
+  suiteTeardown:
+    if savedNs.len > 0: putEnv(CodetracerNimsuggestVar, savedNs)
+    else: delEnv(CodetracerNimsuggestVar)
+
+  template withTraceNimsuggest(body: untyped) =
+    ## Run `body` against the fixture's trace-enabled nimsuggest. The case is
+    ## reported SKIPPED only when this machine has no such nimsuggest, and
+    ## FAILED when it has one that never started. (A `return` from a case
+    ## would report it OK whatever its checks said.)
+    if traceNs.len == 0:
+      checkpoint "no trace-enabled nimsuggest (highlightRange): set " &
+        CodetracerNimsuggestVar & " or build ../codetracer-nim/bin/nimsuggest"
+      skip()
+    elif not nsReady:
+      checkpoint "nimsuggest never reported it initialized for the fixture"
+      fail()
+    else:
+      body
+
   test "initialize advertises semanticTokensProvider with our legend":
     let prov = initResult.capabilities.semanticTokensProvider
     check prov.isSome
@@ -93,7 +135,7 @@ suite "SemanticTokensRange":
   let fixture = "projects/semantic_tokens_fixture/main.nim"
   client.notify("textDocument/didOpen", %createDidOpenParams(fixture))
   let absFile = fixture.fixtureUri.uriToPath
-  let nsReady = waitFor client.waitForNotificationMessage(
+  let nsReady = traceNs.len > 0 and waitFor client.waitForNotificationMessage(
     fmt "Nimsuggest initialized for {absFile}"
   )
 
@@ -102,7 +144,7 @@ suite "SemanticTokensRange":
       "textDocument": {"uri": fixtureUri(fixture)},
       "range": rangeJson,
     }
-    let raw = waitFor client.call("textDocument/semanticTokens/range", params)
+    let raw = client.callBounded("textDocument/semanticTokens/range", params)
     check raw.kind == JObject
     check raw.hasKey("data")
     var data = newSeq[uint32]()
@@ -111,74 +153,60 @@ suite "SemanticTokensRange":
     return decodeWire(data)
 
   test "wide range returns a token sequence sorted by (line, char)":
-    if not nsReady:
-      skip()
-      return
-    let toks = requestTokens(%*{
-      "start": {"line": 0, "character": 0},
-      "end":   {"line": 999, "character": 0},
-    })
-    if toks.len == 0:
-      checkpoint "no tokens received — nimsuggest may lack highlightRange"
-      skip()
-      return
-    for i in 1 ..< toks.len:
-      check (toks[i - 1].line < toks[i].line) or
-            (toks[i - 1].line == toks[i].line and
-             toks[i - 1].startChar <= toks[i].startChar)
-
-  test "determinism: same request twice yields byte-identical payload":
-    if not nsReady:
-      skip()
-      return
-    let params = %*{
-      "textDocument": {"uri": fixtureUri(fixture)},
-      "range": {
+    withTraceNimsuggest:
+      let toks = requestTokens(%*{
         "start": {"line": 0, "character": 0},
         "end":   {"line": 999, "character": 0},
-      },
-    }
-    let a = waitFor client.call("textDocument/semanticTokens/range", params)
-    let b = waitFor client.call("textDocument/semanticTokens/range", params)
-    check a == b
+      })
+      check toks.len > 0
+      for i in 1 ..< toks.len:
+        check (toks[i - 1].line < toks[i].line) or
+              (toks[i - 1].line == toks[i].line and
+               toks[i - 1].startChar <= toks[i].startChar)
+
+  test "determinism: same request twice yields byte-identical payload":
+    withTraceNimsuggest:
+      let params = %*{
+        "textDocument": {"uri": fixtureUri(fixture)},
+        "range": {
+          "start": {"line": 0, "character": 0},
+          "end":   {"line": 999, "character": 0},
+        },
+      }
+      let a = client.callBounded("textDocument/semanticTokens/range", params)
+      let b = client.callBounded("textDocument/semanticTokens/range", params)
+      check a == b
 
   test "range narrowing returns only tokens inside the requested interval":
-    if not nsReady:
-      skip()
-      return
-    # Lines 10–13 contain the `greet` definition + body.
-    let narrow = requestTokens(%*{
-      "start": {"line": 10, "character": 0},
-      "end":   {"line": 13, "character": 0},
-    })
-    if narrow.len == 0:
-      checkpoint "narrow request returned no tokens"
-      skip()
-      return
-    for t in narrow:
-      # nimsuggest is 1-based; LSP range is 0-based.  Allow ±1 slack for
-      # closing positions that nimsuggest may report at the edge.
-      check t.line >= 10
-      check t.line <= 14
+    withTraceNimsuggest:
+      # Lines 10–13 contain the `greet` definition + body.
+      let narrow = requestTokens(%*{
+        "start": {"line": 10, "character": 0},
+        "end":   {"line": 13, "character": 0},
+      })
+      check narrow.len > 0
+      for t in narrow:
+        # nimsuggest is 1-based; LSP range is 0-based.  Allow ±1 slack for
+        # closing positions that nimsuggest may report at the edge.
+        check t.line >= 10
+        check t.line <= 14
 
   test "malformed range produces an empty (non-crashing) response":
-    if not nsReady:
-      skip()
-      return
-    # end < start — encoder should still return a well-formed payload.
-    let raw = waitFor client.call("textDocument/semanticTokens/range", %*{
-      "textDocument": {"uri": fixtureUri(fixture)},
-      "range": {
-        "start": {"line": 50, "character": 0},
-        "end":   {"line": 10, "character": 0},
-      },
-    })
-    check raw.kind == JObject
-    check raw.hasKey("data")
-    check raw["data"].len mod 5 == 0
+    withTraceNimsuggest:
+      # end < start — encoder should still return a well-formed payload.
+      let raw = client.callBounded("textDocument/semanticTokens/range", %*{
+        "textDocument": {"uri": fixtureUri(fixture)},
+        "range": {
+          "start": {"line": 50, "character": 0},
+          "end":   {"line": 10, "character": 0},
+        },
+      })
+      check raw.kind == JObject
+      check raw.hasKey("data")
+      check raw["data"].len mod 5 == 0
 
   test "unknown URI returns an empty response rather than crashing":
-    let raw = waitFor client.call("textDocument/semanticTokens/range", %*{
+    let raw = client.callBounded("textDocument/semanticTokens/range", %*{
       "textDocument": {"uri": "file:///nonexistent/sema_test.nim"},
       "range": {
         "start": {"line": 0, "character": 0},
@@ -190,48 +218,75 @@ suite "SemanticTokensRange":
     check raw["data"].len == 0
 
   test "fixture symbols map to the expected token types":
-    if not nsReady:
-      skip()
-      return
-    let toks = requestTokens(%*{
-      "start": {"line": 0, "character": 0},
-      "end":   {"line": 999, "character": 0},
-    })
-    if toks.len == 0:
-      checkpoint "no tokens received from nimsuggest"
-      skip()
-      return
+    withTraceNimsuggest:
+      let toks = requestTokens(%*{
+        "start": {"line": 0, "character": 0},
+        "end":   {"line": 999, "character": 0},
+      })
+      check toks.len > 0
 
-    # Layout reminder (1-based lines from the fixture):
-    #  7: type
-    #  8:   Foo* = object
-    #  9:     bar*: int
-    # 11: proc greet*(name: string): string =
-    # 12:   let prefix = "hi "
-    # 13:   result = prefix & name
-    # 15: template withFoo*(x: int, body: untyped) =
-    # 18: macro myMacro*(x: int): untyped =
-    # 21: const PI* = 3.14
-    # 22: var counter* = 0
-    #
-    # Each assertion is range-tolerant because nimsuggest can emit tokens
-    # at definition site and (occasionally) at neighbouring positions.
+      # Layout reminder (1-based lines from the fixture):
+      #  7: type
+      #  8:   Foo* = object
+      #  9:     bar*: int
+      # 11: proc greet*(name: string): string =
+      # 12:   let prefix = "hi "
+      # 13:   result = prefix & name
+      # 15: template withFoo*(x: int, body: untyped) =
+      # 18: macro myMacro*(x: int): untyped =
+      # 21: const PI* = 3.14
+      # 22: var counter* = 0
+      #
+      # Each assertion is range-tolerant because nimsuggest can emit tokens
+      # at definition site and (occasionally) at neighbouring positions.
 
-    check anyTokenMatches(toks, 8, "type")          # Foo
-    check anyTokenMatches(toks, 11, "function")     # greet
-    check anyTokenMatches(toks, 15, "macro")        # withFoo (template)
-    check anyTokenMatches(toks, 18, "macro")        # myMacro
+      check anyTokenMatches(toks, 8, "type")          # Foo
+      check anyTokenMatches(toks, 11, "function")     # greet
+      check anyTokenMatches(toks, 15, "macro")        # withFoo (template)
+      check anyTokenMatches(toks, 18, "macro")        # myMacro
 
-    # `const PI = 3.14` — readonly modifier required.
-    var sawReadonlyConst = false
-    for t in tokensOnLine(toks, 21):
-      if t.tokenType == "variable" and "readonly" in t.modifiers:
-        sawReadonlyConst = true
-    check sawReadonlyConst
+      # `const PI = 3.14` — readonly modifier required.
+      var sawReadonlyConst = false
+      for t in tokensOnLine(toks, 21):
+        if t.tokenType == "variable" and "readonly" in t.modifiers:
+          sawReadonlyConst = true
+      check sawReadonlyConst
 
-    # `var counter = 0` — variable WITHOUT readonly.
-    var sawMutableVar = false
-    for t in tokensOnLine(toks, 22):
-      if t.tokenType == "variable" and "readonly" notin t.modifiers:
-        sawMutableVar = true
-    check sawMutableVar
+      # `var counter = 0` — variable WITHOUT readonly.
+      var sawMutableVar = false
+      for t in tokensOnLine(toks, 22):
+        if t.tokenType == "variable" and "readonly" notin t.modifiers:
+          sawMutableVar = true
+      check sawMutableVar
+
+  test "hover and definition sent after a range request are answered":
+    # What Monaco does whenever it draws a Nim file: a range request, with
+    # the editor's hover and definition requests queued behind it on the same
+    # nimsuggest. All three are in flight together; each must be answered.
+    withTraceNimsuggest:
+      let uri = fixtureUri(fixture)
+      let rangeFut = client.call("textDocument/semanticTokens/range", %*{
+        "textDocument": {"uri": uri},
+        "range": {
+          "start": {"line": 0, "character": 0},
+          "end":   {"line": 999, "character": 0},
+        },
+      })
+      # `greet` in `discard greet("world")` (0-based line 24, column 8).
+      let hoverFut = client.call("textDocument/hover", %positionParams(uri, 24, 8))
+      let defFut = client.call("textDocument/definition", %positionParams(uri, 24, 8))
+
+      let tokens = waitFor rangeFut.wait(AnswerTimeout)
+      checkpoint "range answer: " & $tokens
+      check tokens.kind == JObject and tokens{"data"}.len > 0
+
+      let hover = waitFor hoverFut.wait(AnswerTimeout)
+      checkpoint "hover answer: " & $hover
+      check hover.kind == JObject
+      check ($hover).contains("greet")
+
+      let definition = waitFor defFut.wait(AnswerTimeout)
+      checkpoint "definition answer: " & $definition
+      check definition.kind == JArray and definition.len > 0
+      # The declaration on fixture line 11 (0-based 10).
+      check definition.len > 0 and definition[0]{"range", "start", "line"}.getInt(-1) == 10

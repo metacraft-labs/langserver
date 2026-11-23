@@ -31,12 +31,6 @@ import lspsocketclient
 import unittest2
 import trace_test_config
 
-proc traceNimsuggest(): string =
-  let named = getEnv(CodetracerNimsuggestVar)
-  if named.len > 0 and fileExists(named): named
-  elif fileExists(resolvedTraceNimsuggestPath): resolvedTraceNimsuggestPath
-  else: ""
-
 const StaticFile = "projects/statictest/statictest.nim"
 
 proc traceRequest(): JsonNode =

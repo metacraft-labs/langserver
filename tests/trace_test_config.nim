@@ -9,6 +9,15 @@ const resolvedTraceNimsuggestPath* = normalizedPath(
   currentSourcePath().parentDir().parentDir().parentDir() /
   "codetracer-nim" / "bin" / "nimsuggest")
 
+proc traceNimsuggest*(): string =
+  ## The trace-enabled nimsuggest these suites run against:
+  ## `CODETRACER_NIMSUGGEST` (what the CodeTracer dev shell exports), else the
+  ## sibling codetracer-nim build, else "" when this machine has neither.
+  let named = getEnv(CodetracerNimsuggestVar)
+  if named.len > 0 and fileExists(named): named
+  elif fileExists(resolvedTraceNimsuggestPath): resolvedTraceNimsuggestPath
+  else: ""
+
 proc traceConfigHandler*(params: JsonNode): Future[JsonNode] {.async, gcsafe.} =
   {.cast(gcsafe).}:
     return %*[{"nimsuggestPath": resolvedTraceNimsuggestPath}]

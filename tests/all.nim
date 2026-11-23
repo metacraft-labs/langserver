@@ -1,5 +1,6 @@
 import
   tsuggestapi,
+  tsuggest_queue,
   tnimbledump,
   tnimbleprerequisite,
   tcodetracer_nimsuggest,

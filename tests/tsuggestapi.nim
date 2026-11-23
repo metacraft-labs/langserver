@@ -40,6 +40,29 @@ suite "Nimsuggest tests":
       endCol: 11
     )[]
 
+  test "Parsing every section the trace-enabled nimsuggest answers with":
+    # codetracer-nim's `compiler/options.nim` `$`(IdeCmd) names the section
+    # each answer row starts with. `highlightRange` (the semantic-tokens
+    # route) and `declaration` rows used to raise from `parseEnum`.
+    for (name, section) in [
+        ("highlightRange", ideHighlightRange), ("declaration", ideDeclaration),
+        ("globalSymbols", ideGlobalSymbols), ("chkFile", ideChkFile),
+        ("traceExpand", ideTraceExpand), ("traceStatic", ideTraceStatic)]:
+      let row = name & "\tskProc\thw.a\tproc ()\thw/hw.nim\t1\t5\t\"\""
+      let res = parseSuggestDef(row)
+      check res.isSome
+      if res.isSome:
+        check res.get.section == section
+
+  test "A row the parser does not understand is dropped, not raised":
+    # An unknown section or a non-numeric position must not raise: the
+    # exception used to escape the request queue and strand every request
+    # behind the one that received the row.
+    check parseSuggestDef(
+      "someFutureVerb\tskProc\thw.a\tproc ()\thw/hw.nim\t1\t5\t\"\"").isNone
+    check parseSuggestDef(
+      "def\tskProc\thw.a\tproc ()\thw/hw.nim\tone\t5\t\"\"").isNone
+
   test "test Nimsuggest.call":
     let res = waitFor nimSuggest.call("def", helloWorldFile, helloWorldFile, 2, 10)
     doAssert res.len == 1

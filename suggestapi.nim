@@ -29,6 +29,11 @@ type
     Prefix ## prefix does match the symbol
 
   IdeCmd* = enum
+    ## The section that starts every nimsuggest answer row: codetracer-nim's
+    ## `compiler/options.nim` `IdeCmd`, whose `$` names it on the wire.
+    ## `parseSuggestDef` maps the wire name to `"ide" & capitalized name`, so
+    ## each verb the server sends needs its value here; a row whose section is
+    ## missing is dropped (see `parseSuggestDef`).
     ideNone
     ideSug
     ideCon
@@ -36,14 +41,21 @@ type
     ideUse
     ideDus
     ideChk
+    ideChkFile
     ideMod
     ideHighlight
+    ideHighlightRange
     ideOutline
     ideKnown
     ideMsg
     ideProject
+    ideGlobalSymbols
+    ideRecompile
+    ideChanged
     ideType
+    ideDeclaration
     ideExpand
+    ideInlayHints
     ideTraceExpand
     ideTraceStatic
 
@@ -230,24 +242,33 @@ proc parseQualifiedPath*(input: string): seq[string] =
     result.add item
 
 proc parseSuggestDef*(line: string): Option[Suggest] =
+  ## One nimsuggest answer row, or `none` (logged) for a row this server
+  ## cannot read: too few fields, a section `IdeCmd` does not name, or a
+  ## field that is not a number where one is due. Such a row is dropped
+  ## rather than raised: an exception here used to escape `processQueue`,
+  ## leaving the request unanswered and every request after it queued forever.
   let tokens = line.split('\t')
   if tokens.len < 8:
     error "Failed to parse: ", line = line
     return none(Suggest)
-  var sug = Suggest(
-    qualifiedPath: tokens[2].parseQualifiedPath,
-    filePath: tokens[4],
-    line: parseInt(tokens[5]),
-    column: parseInt(tokens[6]),
-    doc: tokens[7].unescape(),
-    forth: tokens[3],
-    symKind: tokens[1],
-    section: parseEnum[IdeCmd]("ide" & capitalizeAscii(tokens[0])),
-  )
-  if tokens.len == 11:
-    sug.endLine = parseInt(tokens[9])
-    sug.endCol = parseInt(tokens[10])
-  some sug
+  try:
+    var sug = Suggest(
+      qualifiedPath: tokens[2].parseQualifiedPath,
+      filePath: tokens[4],
+      line: parseInt(tokens[5]),
+      column: parseInt(tokens[6]),
+      doc: tokens[7].unescape(),
+      forth: tokens[3],
+      symKind: tokens[1],
+      section: parseEnum[IdeCmd]("ide" & capitalizeAscii(tokens[0])),
+    )
+    if tokens.len == 11:
+      sug.endLine = parseInt(tokens[9])
+      sug.endCol = parseInt(tokens[10])
+    some sug
+  except ValueError as e:
+    error "Failed to parse: ", line = line, msg = e.msg
+    none(Suggest)
 
 proc parseSuggestInlayHint*(line: string): SuggestInlayHint =
   let tokens = line.split('\t')
@@ -441,8 +462,9 @@ proc toString*(bytes: openarray[byte]): string =
   if bytes.len > 0:
     copyMem(result[0].addr, bytes[0].unsafeAddr, bytes.len)
 
-proc processQueue(self: Nimsuggest): Future[void] {.async.} =
-  debug "processQueue", size = self.requestQueue.len
+proc drainQueue(self: Nimsuggest): Future[void] {.async.} =
+  ## Send the queued requests to nimsuggest one at a time, finishing each
+  ## request's future with its answer or with the reason it has none.
   while self.requestQueue.len != 0:
     let req = self.requestQueue.popFirst
     self.project.lastCmd = req.commandString
@@ -493,20 +515,33 @@ proc processQueue(self: Nimsuggest): Future[void] {.async.} =
               req.future.fail newException(CatchableError, ex.msg)
           continue
 
-        for lineStr in content.splitLines:
-          if lineStr != "":
-            case req.command
-            of "known":
-              let sug = Suggest()
-              sug.section = ideKnown
-              sug.forth = lineStr
-              res.add sug
-            of "inlayHints":
-              res.add Suggest(inlayHintInfo: parseSuggestInlayHint(lineStr))
-            else:
-              let sug = parseSuggestDef(lineStr)
-              if sug.isSome:
-                res.add sug.get
+        try:
+          for lineStr in content.splitLines:
+            if lineStr != "":
+              case req.command
+              of "known":
+                let sug = Suggest()
+                sug.section = ideKnown
+                sug.forth = lineStr
+                res.add sug
+              of "inlayHints":
+                res.add Suggest(inlayHintInfo: parseSuggestInlayHint(lineStr))
+              else:
+                let sug = parseSuggestDef(lineStr)
+                if sug.isSome:
+                  res.add sug.get
+        except CatchableError as ex:
+          # An answer this server cannot read fails this request only. Raised
+          # out of the loop, it left the request pending and `processing` set,
+          # so every later request to this nimsuggest waited forever.
+          error "Failed to parse the nimsuggest answer", msg = ex.msg
+          transport.close()
+          if not req.future.finished:
+            req.future.fail newException(
+              CatchableError,
+              fmt "could not parse nimsuggest's answer to {req.command}: {ex.msg}",
+            )
+          continue
 
         if (content == ""):
           self.project.markFailed "Server crashed/socket closed."
@@ -529,8 +564,17 @@ proc processQueue(self: Nimsuggest): Future[void] {.async.} =
         else:
           debug "Call was cancelled before sending the result", command = req.command
           transport.close()
-  self.processing = false
   self.project.lastCmdDate = some(now())
+
+proc processQueue(self: Nimsuggest): Future[void] {.async.} =
+  ## `call` starts this when no queue run is in progress. `processing` is
+  ## cleared however the run ends, so a defect that escapes `drainQueue`
+  ## cannot leave every later `call` queued behind a run that is gone.
+  debug "processQueue", size = self.requestQueue.len
+  try:
+    await self.drainQueue()
+  finally:
+    self.processing = false
 
 proc call*(
     self: Nimsuggest,
