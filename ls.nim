@@ -594,6 +594,16 @@ proc getProjectFileAutoGuess*(
     path = dir
     inc up
 
+proc isInitialized*(ls: LanguageServer): bool =
+  ## Whether the client's `initialize` request has been accepted.
+  ##
+  ## `initialize` stores its params before its first suspension point, so this
+  ## turns true while the request is being dispatched; a client that waits for
+  ## the `InitializeResult` (as LSP 3.17 requires) never observes the gap.
+  ## Until then `initializeParams` is nil, and every handler that reads it
+  ## (through `getRootPath`, for instance) would dereference nil.
+  not ls.initializeParams.isNil
+
 proc getRootPath*(ip: InitializeParams): string =
   if ip.rootUri.isNone or ip.rootUri.get == "":
     if ip.rootPath.isSome and ip.rootPath.get != "":

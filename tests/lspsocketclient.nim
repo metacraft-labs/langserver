@@ -138,6 +138,29 @@ proc notify*(client: LspSocketClient, name: string, params: JsonNode) =
 
   asyncSpawn wrap()
 
+proc sendNotification*(
+    client: LspSocketClient, name: string, params: JsonNode
+) {.async.} =
+  ## Sends a JSON-RPC notification: a message with no `id`
+  ## (https://www.jsonrpc.org/specification#notification).
+  ## `notify` above sends a request with an id that it never awaits, which
+  ## the server cannot tell apart from a request; the lifecycle tests need
+  ## the real thing.
+  let msg = %*{"jsonrpc": "2.0", "method": name, "params": params}
+  discard await client.transport.write(wrapContentWithContentLenght($msg))
+
+proc callError*(
+    client: LspSocketClient, name: string, params: JsonNode
+): Future[JsonNode] {.async.} =
+  ## Sends a request that the caller expects to fail, and returns the
+  ## response's `error` object. Returns nil when the server answered with a
+  ## result instead.
+  try:
+    discard await client.call(name, params)
+  except JsonRpcError as ex:
+    # `processMessage` fails the response future with `$error` as its message.
+    return parseJson(ex.msg)
+
 proc register*(client: LspSocketClient, name: string, notRpc: NotificationRpc) =
   client.notifications[name] = notRpc
   client.calls[name] = newSeq[JsonNode]()

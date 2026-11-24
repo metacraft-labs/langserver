@@ -2,7 +2,7 @@ import json_rpc/[servers/socketserver, private/jrpc_sys, jsonmarshal, rpcclient,
 import chronicles, chronos
 import std/[syncio, os, json, strutils, strformat, streams, oids, sequtils, times]
 import ls, utils
-import protocol/types, chronos/threadsync
+import protocol/[types, enums], chronos/threadsync
 
 type
   LspClientResponse* = object
@@ -147,6 +147,19 @@ proc writeOutput*(ls: LanguageServer, content: JsonNode) =
   except CatchableError as ex:
     error "Error writing output", msg = ex.msg
 
+proc writeError(ls: LanguageServer, id: RequestId, code: ErrorCode, message: string) =
+  ## Answers the request `id` with a JSON-RPC error response
+  ## (https://www.jsonrpc.org/specification#response_object).
+  let idJson =
+    case id.kind
+    of riNumber: %id.num
+    of riString: %id.str
+    of riNull: newJNull()
+  ls.writeOutput(%*{
+    "jsonrpc": "2.0", "id": idJson,
+    "error": {"code": code.int, "message": message}
+  })
+
 proc runRpc(ls: LanguageServer, req: RequestRx, rpc: RpcProc): Future[void] {.async.} =
   try:
     let res = await rpc(req.params)
@@ -166,11 +179,7 @@ proc runRpc(ls: LanguageServer, req: RequestRx, rpc: RpcProc): Future[void] {.as
     # A logged failure is not a response: the caller otherwise waits forever.
     # Notifications have no request ID and must remain response-free.
     if req.id.kind != riNull:
-      let id = if req.id.kind == riNumber: %req.id.num else: %req.id.str
-      ls.writeOutput(%*{
-        "jsonrpc": "2.0", "id": id,
-        "error": {"code": -32603, "message": ex.msg}
-      })
+      ls.writeError(req.id, ErrorCode.InternalError, ex.msg)
 
 proc processMessage(ls: LanguageServer, message: string) {.raises: [].} =
   try:
@@ -189,9 +198,27 @@ proc processMessage(ls: LanguageServer, message: string) {.raises: [].} =
         req.params.named.add ParamDescNamed(
           name: "method", value: JsonString($(contentJson["method"]))
         )
-      let rpc = ls.srv.router.procs.getOrDefault(req.meth.get)
+      let meth = req.meth.get
+      # LSP 3.17, "Initialize Request": until the server has answered
+      # `initialize`, it errors every request with ServerNotInitialized and
+      # drops every notification except `exit`.
+      # https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#initialize
+      # The handlers assume `initializeParams` is set, so running one earlier
+      # dereferences nil and kills the process.
+      if not ls.isInitialized and meth notin ["initialize", "exit"]:
+        if req.id.kind == riNull:
+          debug "[Processing Message] dropping a notification before initialize",
+            meth = meth
+        else:
+          debug "[Processing Message] refusing a request before initialize",
+            meth = meth
+          ls.writeError(
+            req.id, ErrorCode.ServerNotInitialized, "the server has not been initialized"
+          )
+        return
+      let rpc = ls.srv.router.procs.getOrDefault(meth)
       if rpc.isNil:
-        error "[Processing Message] rpc method not found: ", msg = req.meth.get
+        error "[Processing Message] rpc method not found: ", msg = meth
         return
       asyncSpawn ls.runRpc(req, rpc)
     else: #Response

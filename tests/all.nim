@@ -6,6 +6,7 @@ import
   tcodetracer_nimsuggest,
   tnimsuggest_restart,
   tnimlangserver,
+  tlifecycle,
   tprojectsetup,
   textensions,
   tmisc,
